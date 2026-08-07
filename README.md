@@ -1,31 +1,23 @@
-# EAR OCR Checker — Label Anchored V4
+# EAR OCR Checker — Hybrid V5
 
-เวอร์ชันนี้แก้ปัญหาที่ OCR อ่านเลขได้ แต่เลือกเลขผิดหัวข้อ
+เวอร์ชันนี้แก้ปัญหา "ฝั่งรูปถ่ายอ่านไม่ขึ้น" และ "OCR อ่านรหัสผิด" โดยเปลี่ยนจาก OCR pass เดียวเป็น Hybrid OCR
 
-## หลักการใหม่
+## สิ่งที่ทำ
+- PDF text layer (ถ้ามี)
+- OCR ไทย + อังกฤษ 4 pass ต่อหน้า
+- OCR รหัส A-Z/0-9 แยกอีก 2 pass ต่อหน้า
+- Contrast / threshold preprocessing
+- CONTAINER ใช้รูปแบบ ISO-like AAAA1234567
+- SEAL/BOOKING ใช้ label context + candidate scoring
+- แสดง OCR candidates ใต้แต่ละช่อง เพื่อเลือกค่าที่ OCR เห็นได้ทันที
+- ไม่บังคับให้ค่าทั้งสองเอกสารเหมือนกัน เพื่อไม่ซ่อนความผิดพลาดจริง
 
-ระบบจะไม่เลือก Code/เลขจากทั้งเอกสารมาเดาว่าเป็น SEAL หรือ BOOKING อีกต่อไป
-
-- CONTAINER NUMBER: อ่านค่าที่ติดกับหัวข้อ CONTAINER/หมายเลขตู้ และมี fallback เฉพาะรูปแบบ Container ที่เข้มงวด
-- SEAL NO: รับค่าเฉพาะที่อยู่หลัง/ใต้หัวข้อ SEAL/เลขซีล
-- BOOKING: รับค่าเฉพาะที่อยู่หลัง/ใต้หัวข้อ BOOKING/เลขบุ๊กกิ้ง/หมายเลขจอง
-- ถ้าหาหัวข้อหรือค่าที่เกี่ยวข้องไม่พบ ระบบจะแสดง "ไม่พบข้อมูล" แทนการเอา Order No., Invoice No. หรือเลขอื่นมาใส่ผิดช่อง
-
-## OCR
-
-- ภาษาไทย + อังกฤษ
-- PDF ที่มี text layer จะอ่าน text ก่อน
-- PDF scan / JPG / PNG / WEBP ใช้ OCR
-- OCR หลาย pass: ต้นฉบับ, Contrast, sparse text, ขาวดำ
-- Container มีการแก้ OCR confusion O/0, I/1, S/5 ฯลฯ อย่างจำกัดเฉพาะรูปแบบ Container
-
-## การอัปเดต
-
-แตก ZIP แล้วอัปโหลดไฟล์ทั้ง 5 ไฟล์ทับของเดิมใน GitHub:
+## อัปเดต GitHub
+แตก ZIP และอัปโหลดไฟล์ทั้ง 5 ไฟล์ทับใน repository เดิม จากนั้น Commit changes:
 - index.html
 - app.js
 - styles.css
 - vercel.json
 - README.md
 
-Commit แล้ว Vercel จะ deploy ให้เอง
+Vercel จะ deploy อัตโนมัติ
