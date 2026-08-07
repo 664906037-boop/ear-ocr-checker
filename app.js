@@ -24,7 +24,7 @@ function emptyFields() {
 }
 
 function thaiToArabic(value) {
-  return String(value || '').replace(/[๐-๙]/g, (d) => THAI_DIGITS[d] || d);
+  return String(value || '').replace(/[๐-๙]/g, d => THAI_DIGITS[d] || d);
 }
 
 function normalize(value) {
@@ -36,8 +36,8 @@ function normalize(value) {
     .replace(/[‐‑‒–—]/g, '');
 }
 
-function cleanCandidate(value) {
-  return thaiToArabic(value)
+function cleanValue(value) {
+  return thaiToArabic(String(value || ''))
     .toUpperCase()
     .replace(/[“”"'`]/g, '')
     .replace(/^[\s:=#\-–—.]+/, '')
@@ -45,162 +45,196 @@ function cleanCandidate(value) {
     .trim();
 }
 
-function repairCommonOcrErrors(value, kind = 'generic') {
-  let result = cleanCandidate(value)
-    .replace(/[‐‑‒–—]/g, '-')
-    .replace(/\s+/g, '');
-
-  if (kind === 'container') {
-    const compact = result.replace(/[^A-Z0-9]/g, '');
-    if (compact.length >= 11) {
-      const first = compact.slice(0, 4)
-        .replace(/0/g, 'O')
-        .replace(/1/g, 'I')
-        .replace(/5/g, 'S')
-        .replace(/8/g, 'B');
-      const rest = compact.slice(4, 11)
-        .replace(/O/g, '0')
-        .replace(/[IL]/g, '1')
-        .replace(/S/g, '5')
-        .replace(/B/g, '8')
-        .replace(/Z/g, '2')
-        .replace(/G/g, '6');
-      return first + rest;
-    }
-  }
-
-  return result.replace(/[^A-Z0-9]/g, '');
-}
-
-function scoreCandidate(value, kind, context = '') {
-  const v = repairCommonOcrErrors(value, kind);
-  let score = 0;
-
-  if (kind === 'container') {
-    if (/^[A-Z]{4}\d{7}$/.test(v)) score += 100;
-    if (/^[A-Z]{3}U\d{7}$/.test(v)) score += 15;
-    if (v.length === 11) score += 10;
-  } else {
-    if (/^[A-Z0-9]{5,20}$/.test(v)) score += 40;
-    if (/[A-Z]/.test(v) && /\d/.test(v)) score += 15;
-    if (v.length >= 7 && v.length <= 14) score += 10;
-  }
-
-  const c = String(context || '').toUpperCase();
-  if (kind === 'seal' && /SEAL|ซีล/.test(c)) score += 50;
-  if (kind === 'booking' && /BOOK|บุ๊ก|จอง/.test(c)) score += 50;
-  if (kind === 'container' && /CONTAINER|ตู้|คอนเทนเนอร์/.test(c)) score += 50;
-
-  return { value: v, score };
+function labelNormalized(line) {
+  return thaiToArabic(String(line || ''))
+    .toUpperCase()
+    // Fix OCR mistakes ONLY for label matching, never blindly for values.
+    .replace(/B[0O][0O]K[I1L]NG/g, 'BOOKING')
+    .replace(/C[0O]NTA[I1L]NER/g, 'CONTAINER')
+    .replace(/N[0O][\.\:]?/g, 'NO')
+    .replace(/SEA[I1L]/g, 'SEAL')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function linesOf(text) {
   return String(text || '')
     .replace(/\r/g, '\n')
     .split(/\n+/)
-    .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+    .map(line => line.replace(/[ \t]+/g, ' ').trim())
     .filter(Boolean);
 }
 
-function candidatesNearLabels(text, labels, kind) {
-  const lines = linesOf(text);
-  const output = [];
+const LABELS = {
+  containerNumber: [
+    /CONTAINER\s*(?:NUMBER|NO|#)?/i,
+    /หมายเลข\s*ตู้|เลข\s*ตู้|ตู้\s*คอนเทนเนอร์|หมายเลข\s*คอนเทนเนอร์/i,
+  ],
+  sealNo: [
+    /SEAL\s*(?:NUMBER|NO|#)?/i,
+    /หมายเลข\s*ซีล|เลข\s*ซีล|ซีล/i,
+  ],
+  booking: [
+    /BOOKING\s*(?:NUMBER|NO|#)?/i,
+    /หมายเลข\s*บุ๊กกิ้ง|เลข\s*บุ๊กกิ้ง|บุ๊กกิ้ง|หมายเลข\s*จอง|เลขที่\s*จอง|เลข\s*จอง/i,
+  ],
+};
 
-  for (let i = 0; i < lines.length; i += 1) {
-    const current = lines[i];
-    const matched = labels.some((label) => label.test(current));
-    if (!matched) continue;
+function isAnyFieldLabel(line) {
+  const fixed = labelNormalized(line);
+  return Object.values(LABELS).some(patterns =>
+    patterns.some(p => p.test(fixed))
+  );
+}
 
-    const neighborhood = [
-      current,
-      lines[i + 1] || '',
-      lines[i + 2] || '',
-      lines[i - 1] || '',
+function valueLooksLikeContainer(raw) {
+  const c = repairContainer(raw);
+  return /^[A-Z]{4}\d{7}$/.test(c);
+}
+
+function repairContainer(raw) {
+  let compact = cleanValue(raw).replace(/[^A-Z0-9]/g, '');
+  if (compact.length < 11) return compact;
+
+  // Work only on a probable 11-character ISO-style container candidate.
+  compact = compact.slice(0, 11);
+  let prefix = compact.slice(0, 4)
+    .replace(/0/g, 'O')
+    .replace(/1/g, 'I')
+    .replace(/5/g, 'S')
+    .replace(/8/g, 'B');
+  let digits = compact.slice(4)
+    .replace(/O/g, '0')
+    .replace(/[IL]/g, '1')
+    .replace(/Z/g, '2')
+    .replace(/S/g, '5')
+    .replace(/G/g, '6')
+    .replace(/B/g, '8');
+
+  return prefix + digits;
+}
+
+function cleanGenericCode(raw) {
+  return cleanValue(raw).replace(/[^A-Z0-9]/g, '');
+}
+
+function valueLooksLikeGenericCode(raw) {
+  const v = cleanGenericCode(raw);
+  return v.length >= 5 && v.length <= 24 && /\d/.test(v);
+}
+
+// Remove a matched label from the start/middle of a line and return only the
+// text following that exact label. This prevents Order/Invoice/etc. being chosen.
+function afterSpecificLabel(line, fieldKey) {
+  const original = thaiToArabic(String(line || ''));
+  const fixed = labelNormalized(original);
+
+  const fieldPatterns = LABELS[fieldKey];
+  for (const p of fieldPatterns) {
+    const m = fixed.match(p);
+    if (!m || m.index == null) continue;
+
+    // Because labelNormalized preserves overall character order sufficiently,
+    // take the visible tail after the label and stop at the next known label.
+    const start = m.index + m[0].length;
+    let tail = fixed.slice(start);
+
+    // Stop before another field heading if OCR placed several columns on one line.
+    const stopTokens = [
+      'CONTAINER', 'SEAL', 'BOOKING',
+      'หมายเลขตู้', 'เลขตู้', 'หมายเลขซีล', 'เลขซีล',
+      'หมายเลขจอง', 'เลขจอง', 'บุ๊กกิ้ง',
+      'REMARK', 'LOCATION', 'STATUS', 'SIZE', 'DATE',
+      'ORDER', 'INVOICE', 'LINER', 'GENERATOR'
     ];
 
-    for (const line of neighborhood) {
-      const tokens = line.match(/[A-Z0-9๐-๙][A-Z0-9๐-๙\-_/ ]{3,24}/gi) || [];
-      for (const token of tokens) {
-        const scored = scoreCandidate(token, kind, neighborhood.join(' '));
-        if (scored.value) output.push(scored);
+    let stop = tail.length;
+    for (const token of stopTokens) {
+      const idx = tail.indexOf(token);
+      if (idx > 0 && idx < stop) stop = idx;
+    }
+    tail = tail.slice(0, stop);
+
+    return tail.replace(/^[\s:=#\-–—.]+/, '').trim();
+  }
+  return '';
+}
+
+function tokenCandidates(value) {
+  return String(value || '')
+    .toUpperCase()
+    .match(/[A-Z0-9๐-๙][A-Z0-9๐-๙\-_/]{3,24}/g) || [];
+}
+
+function extractContainerStrict(lines) {
+  // 1) Prefer value following CONTAINER label.
+  for (let i = 0; i < lines.length; i++) {
+    const fixed = labelNormalized(lines[i]);
+    if (!LABELS.containerNumber.some(p => p.test(fixed))) continue;
+
+    const sameLine = afterSpecificLabel(lines[i], 'containerNumber');
+    for (const token of tokenCandidates(sameLine)) {
+      if (valueLooksLikeContainer(token)) return repairContainer(token);
+    }
+
+    // Allow only the next two lines, and stop if we encounter another heading.
+    for (let step = 1; step <= 2; step++) {
+      const next = lines[i + step] || '';
+      if (!next || isAnyFieldLabel(next)) break;
+      for (const token of tokenCandidates(next)) {
+        if (valueLooksLikeContainer(token)) return repairContainer(token);
       }
     }
   }
-  return output;
+
+  // 2) Container number has a uniquely strict ISO-like shape, so a global
+  // fallback is safe enough ONLY for this field.
+  const whole = thaiToArabic(lines.join(' ')).toUpperCase();
+  const matches = whole.match(/\b[A-Z0-9]{4}[\s\-]?[A-Z0-9]{7}\b/g) || [];
+  for (const candidate of matches) {
+    if (valueLooksLikeContainer(candidate)) return repairContainer(candidate);
+  }
+
+  return '';
 }
 
-function globalCandidates(text, kind) {
-  const source = thaiToArabic(String(text || '')).toUpperCase();
-  const output = [];
+function extractAnchoredGeneric(lines, fieldKey) {
+  // SEAL and BOOKING must NEVER use a global "guess any code" fallback.
+  // They are returned only when found next to their own heading.
+  for (let i = 0; i < lines.length; i++) {
+    const fixed = labelNormalized(lines[i]);
+    if (!LABELS[fieldKey].some(p => p.test(fixed))) continue;
 
-  if (kind === 'container') {
-    const patterns = [
-      /\b([A-Z0-9]{4}\s*[- ]?\s*[A-Z0-9]{7})\b/g,
-      /\b([A-Z]{3}[U0]\s*[- ]?\s*[0-9OILSBZG]{7})\b/g,
-    ];
-    for (const pattern of patterns) {
-      for (const match of source.matchAll(pattern)) {
-        output.push(scoreCandidate(match[1], kind, match[0]));
-      }
+    const sameLine = afterSpecificLabel(lines[i], fieldKey);
+    const sameTokens = tokenCandidates(sameLine)
+      .map(cleanGenericCode)
+      .filter(valueLooksLikeGenericCode);
+
+    if (sameTokens.length) {
+      // Usually the first code following the exact heading is the desired value.
+      return sameTokens[0];
     }
-  } else {
-    const pattern = /\b([A-Z0-9][A-Z0-9\-_/]{4,19})\b/g;
-    for (const match of source.matchAll(pattern)) {
-      output.push(scoreCandidate(match[1], kind, match[0]));
+
+    // If OCR separated label/value into lines, inspect only the immediate next
+    // line. Do not roam around the document.
+    const next = lines[i + 1] || '';
+    if (next && !isAnyFieldLabel(next)) {
+      const nextTokens = tokenCandidates(next)
+        .map(cleanGenericCode)
+        .filter(valueLooksLikeGenericCode);
+      if (nextTokens.length) return nextTokens[0];
     }
   }
 
-  return output;
-}
-
-function bestCandidate(candidates, exclusions = []) {
-  const excluded = new Set(exclusions.map(normalize));
-  const unique = new Map();
-
-  for (const item of candidates) {
-    const key = normalize(item.value);
-    if (!key || excluded.has(key)) continue;
-    const old = unique.get(key);
-    if (!old || item.score > old.score) unique.set(key, item);
-  }
-
-  return [...unique.values()]
-    .sort((a, b) => b.score - a.score || b.value.length - a.value.length)[0]?.value || '';
+  return '';
 }
 
 function extractFields(text) {
-  const containerLabels = [
-    /CONTA[I1L]NER\s*(?:NUMBER|N[O0]\.?|#)?/i,
-    /หมายเลขตู้|เลขตู้|ตู้คอนเทนเนอร์|หมายเลขคอนเทนเนอร์/i,
-  ];
-  const sealLabels = [
-    /SEA[L1I]\s*(?:NUMBER|N[O0]\.?|#)?/i,
-    /หมายเลขซีล|เลขซีล|ซีล/i,
-  ];
-  const bookingLabels = [
-    /B[O0][O0]K[I1L]NG\s*(?:NUMBER|N[O0]\.?|#)?/i,
-    /หมายเลขบุ๊กกิ้ง|เลขบุ๊กกิ้ง|บุ๊กกิ้ง|หมายเลขจอง|เลขที่จอง|เลขจอง/i,
-  ];
-
-  const container = bestCandidate([
-    ...candidatesNearLabels(text, containerLabels, 'container'),
-    ...globalCandidates(text, 'container'),
-  ]);
-
-  const seal = bestCandidate([
-    ...candidatesNearLabels(text, sealLabels, 'seal'),
-    ...globalCandidates(text, 'seal').map((x) => ({ ...x, score: x.score - 25 })),
-  ], [container]);
-
-  const booking = bestCandidate([
-    ...candidatesNearLabels(text, bookingLabels, 'booking'),
-    ...globalCandidates(text, 'booking').map((x) => ({ ...x, score: x.score - 25 })),
-  ], [container, seal]);
-
+  const lines = linesOf(text);
   return {
-    containerNumber: container,
-    sealNo: seal,
-    booking,
+    containerNumber: extractContainerStrict(lines),
+    sealNo: extractAnchoredGeneric(lines, 'sealNo'),
+    booking: extractAnchoredGeneric(lines, 'booking'),
   };
 }
 
@@ -221,7 +255,7 @@ function diffHint(a, b) {
   if (!na || !nb || na === nb) return '';
   const max = Math.max(na.length, nb.length);
   const positions = [];
-  for (let i = 0; i < max; i += 1) {
+  for (let i = 0; i < max; i++) {
     if ((na[i] || '∅') !== (nb[i] || '∅')) positions.push(i + 1);
   }
   return `ต่างกันที่ตำแหน่ง: ${positions.slice(0, 20).join(', ')}${positions.length > 20 ? '…' : ''}`;
@@ -252,19 +286,19 @@ function attachUpload(index) {
   input.addEventListener('change', () =>
     setFile(index, input.files?.[0] || null));
 
-  ['dragenter', 'dragover'].forEach((eventName) =>
-    drop.addEventListener(eventName, (event) => {
+  ['dragenter', 'dragover'].forEach(eventName =>
+    drop.addEventListener(eventName, event => {
       event.preventDefault();
       drop.classList.add('drag');
     }));
 
-  ['dragleave', 'drop'].forEach((eventName) =>
-    drop.addEventListener(eventName, (event) => {
+  ['dragleave', 'drop'].forEach(eventName =>
+    drop.addEventListener(eventName, event => {
       event.preventDefault();
       drop.classList.remove('drag');
     }));
 
-  drop.addEventListener('drop', (event) => {
+  drop.addEventListener('drop', event => {
     const file = event.dataTransfer?.files?.[0] || null;
     if (file) setFile(index, file);
   });
@@ -319,7 +353,7 @@ function isPdf(file) {
     file.name.toLowerCase().endsWith('.pdf');
 }
 
-async function renderPdfPage(pdf, pageNumber, scale = 2.5) {
+async function renderPdfPage(pdf, pageNumber, scale = 2.6) {
   const page = await pdf.getPage(pageNumber);
   const viewport = page.getViewport({ scale });
   const canvas = document.createElement('canvas');
@@ -342,12 +376,16 @@ async function extractNativePdfText(file) {
   const pages = [];
   const maxPages = Math.min(pdf.numPages, 10);
 
-  for (let pageNo = 1; pageNo <= maxPages; pageNo += 1) {
+  for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
     const page = await pdf.getPage(pageNo);
     const content = await page.getTextContent();
-    pages.push(content.items
-      .map((item) => ('str' in item ? item.str : ''))
-      .join(' '));
+
+    // Preserve more separation between PDF text items than the old version.
+    const items = content.items
+      .map(item => ('str' in item ? item.str : ''))
+      .filter(Boolean);
+
+    pages.push(items.join('\n'));
   }
 
   return pages.join('\n');
@@ -355,8 +393,8 @@ async function extractNativePdfText(file) {
 
 async function imageFileToCanvas(file) {
   const bitmap = await createImageBitmap(file);
-  const maxSide = 2600;
-  const scale = Math.min(3, maxSide / Math.max(bitmap.width, bitmap.height));
+  const maxSide = 3000;
+  const scale = Math.min(3.2, maxSide / Math.max(bitmap.width, bitmap.height));
   const canvas = document.createElement('canvas');
 
   canvas.width = Math.max(1, Math.round(bitmap.width * scale));
@@ -382,8 +420,8 @@ async function fileToCanvases(file) {
     const canvases = [];
     const maxPages = Math.min(pdf.numPages, 10);
 
-    for (let page = 1; page <= maxPages; page += 1) {
-      canvases.push(await renderPdfPage(pdf, page, 2.8));
+    for (let page = 1; page <= maxPages; page++) {
+      canvases.push(await renderPdfPage(pdf, page, 3.0));
     }
     return canvases;
   }
@@ -399,21 +437,22 @@ function preprocessCanvas(source, mode) {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(source, 0, 0);
 
+  if (mode === 'original') return canvas;
+
   const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const data = image.data;
 
   for (let i = 0; i < data.length; i += 4) {
     const gray = Math.round(
-      data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+      data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114
+    );
 
     let value = gray;
-
     if (mode === 'contrast') {
-      value = gray < 175 ? Math.max(0, gray - 55) : Math.min(255, gray + 35);
+      const factor = 1.7;
+      value = Math.max(0, Math.min(255, (gray - 128) * factor + 128));
     } else if (mode === 'threshold') {
-      value = gray < 185 ? 0 : 255;
-    } else if (mode === 'soft-threshold') {
-      value = gray < 205 ? 20 : 255;
+      value = gray < 190 ? 0 : 255;
     }
 
     data[i] = value;
@@ -436,28 +475,29 @@ async function recognizeCanvas(worker, canvas, psm) {
   return result.data.text || '';
 }
 
+function allThreeFound(fields) {
+  return Boolean(fields.containerNumber && fields.sealNo && fields.booking);
+}
+
 async function runOcrOnFile(file, fileNumber, startPercent, endPercent) {
   const nativeText = await extractNativePdfText(file).catch(() => '');
   const nativeFields = extractFields(nativeText);
 
-  if (nativeFields.containerNumber &&
-      nativeFields.sealNo &&
-      nativeFields.booking) {
-    setProgress(endPercent, `ข้อมูล ${fileNumber}: อ่านจากข้อความใน PDF สำเร็จ`);
+  if (allThreeFound(nativeFields)) {
+    setProgress(endPercent, `ข้อมูล ${fileNumber}: พบทั้ง 3 หัวข้อจาก PDF`);
     return nativeText;
   }
 
   const canvases = await fileToCanvases(file);
+
   const worker = await Tesseract.createWorker('eng+tha', 1, {
-    logger: (message) => {
+    logger: message => {
       if (message.status === 'recognizing text') {
         const local = message.progress || 0;
         const percent = startPercent +
-          (endPercent - startPercent) * Math.min(0.95, local);
-        setProgress(
-          percent,
-          `กำลังอ่านข้อมูล ${fileNumber}: ${Math.round(local * 100)}%`
-        );
+          (endPercent - startPercent) * Math.min(0.9, local);
+        setProgress(percent,
+          `กำลังอ่านข้อมูล ${fileNumber}: ${Math.round(local * 100)}%`);
       }
     },
   });
@@ -465,33 +505,35 @@ async function runOcrOnFile(file, fileNumber, startPercent, endPercent) {
   const chunks = [nativeText];
 
   try {
-    for (let i = 0; i < canvases.length; i += 1) {
-      const page = canvases[i];
-      const modes = [
-        { name: 'ภาพต้นฉบับ', canvas: page, psm: 6 },
-        { name: 'เพิ่มความคมชัด', canvas: preprocessCanvas(page, 'contrast'), psm: 6 },
-        { name: 'ขาวดำ', canvas: preprocessCanvas(page, 'threshold'), psm: 11 },
-        { name: 'ขาวดำแบบอ่อน', canvas: preprocessCanvas(page, 'soft-threshold'), psm: 11 },
+    for (let pageIndex = 0; pageIndex < canvases.length; pageIndex++) {
+      const page = canvases[pageIndex];
+      const passes = [
+        { name: 'ต้นฉบับ', mode: 'original', psm: 6 },
+        { name: 'เพิ่ม Contrast', mode: 'contrast', psm: 6 },
+        { name: 'ค้นหาข้อความกระจาย', mode: 'contrast', psm: 11 },
+        { name: 'ขาวดำ', mode: 'threshold', psm: 11 },
       ];
 
-      for (let pass = 0; pass < modes.length; pass += 1) {
-        const mode = modes[pass];
-        const step = (i * modes.length + pass + 1) /
-          (canvases.length * modes.length);
+      for (let passIndex = 0; passIndex < passes.length; passIndex++) {
+        const pass = passes[passIndex];
+        const processed = preprocessCanvas(page, pass.mode);
+
         setProgress(
-          startPercent + (endPercent - startPercent) * step,
-          `ข้อมูล ${fileNumber} หน้า ${i + 1}: ${mode.name}`
+          startPercent +
+            (endPercent - startPercent) *
+              ((pageIndex * passes.length + passIndex + 1) /
+                (canvases.length * passes.length)),
+          `ข้อมูล ${fileNumber} หน้า ${pageIndex + 1}: ${pass.name}`
         );
 
-        const text = await recognizeCanvas(worker, mode.canvas, mode.psm);
-        chunks.push(`\n--- หน้า ${i + 1} / ${mode.name} ---\n${text}`);
+        const text = await recognizeCanvas(worker, processed, pass.psm);
+        chunks.push(`\n--- OCR หน้า ${pageIndex + 1}: ${pass.name} ---\n${text}`);
 
-        const fields = extractFields(chunks.join('\n'));
-        if (fields.containerNumber && fields.sealNo && fields.booking) break;
+        // Stop early only when the STRICT label-based parser has all 3.
+        if (allThreeFound(extractFields(chunks.join('\n')))) break;
       }
 
-      const current = extractFields(chunks.join('\n'));
-      if (current.containerNumber && current.sealNo && current.booking) break;
+      if (allThreeFound(extractFields(chunks.join('\n')))) break;
     }
   } finally {
     await worker.terminate();
@@ -505,7 +547,6 @@ function renderResults() {
   body.innerHTML = '';
 
   for (const config of FIELD_CONFIG) {
-    const row = document.createElement('tr');
     const result = compare(
       state.fields[0][config.key],
       state.fields[1][config.key]
@@ -513,34 +554,27 @@ function renderResults() {
 
     const statusClass = result.missing
       ? 'missing'
-      : result.match
-        ? 'match'
-        : 'mismatch';
+      : result.match ? 'match' : 'mismatch';
 
     const statusText = result.missing
       ? 'ไม่พบข้อมูล'
-      : result.match
-        ? 'ตรงกัน'
-        : 'ไม่ตรงกัน';
+      : result.match ? 'ตรงกัน' : 'ไม่ตรงกัน';
 
     const hint = diffHint(
       state.fields[0][config.key],
       state.fields[1][config.key]
     );
 
+    const row = document.createElement('tr');
     row.innerHTML = `
       <td>${config.label}</td>
       <td>
-        <input
-          data-side="0"
-          data-key="${config.key}"
+        <input data-side="0" data-key="${config.key}"
           value="${escapeHtml(state.fields[0][config.key])}"
           aria-label="${config.label} ข้อมูล 1">
       </td>
       <td>
-        <input
-          data-side="1"
-          data-key="${config.key}"
+        <input data-side="1" data-key="${config.key}"
           value="${escapeHtml(state.fields[1][config.key])}"
           aria-label="${config.label} ข้อมูล 2">
       </td>
@@ -549,11 +583,10 @@ function renderResults() {
         ${hint ? `<div class="char-diff">${hint}</div>` : ''}
       </td>
     `;
-
     body.append(row);
   }
 
-  body.querySelectorAll('input').forEach((input) => {
+  body.querySelectorAll('input').forEach(input => {
     input.addEventListener('input', () => {
       const side = Number(input.dataset.side);
       const key = input.dataset.key;
@@ -563,12 +596,11 @@ function renderResults() {
   });
 
   const passed = FIELD_CONFIG.every(({ key }) =>
-    compare(state.fields[0][key], state.fields[1][key]).match);
+    compare(state.fields[0][key], state.fields[1][key]).match
+  );
 
   const overall = document.querySelector('#overallStatus');
-  overall.textContent = passed
-    ? 'ผ่านการตรวจสอบ'
-    : 'ไม่ผ่านการตรวจสอบ';
+  overall.textContent = passed ? 'ผ่านการตรวจสอบ' : 'ไม่ผ่านการตรวจสอบ';
   overall.className = `overall ${passed ? 'pass' : 'fail'}`;
 }
 
@@ -593,13 +625,11 @@ async function checkDocuments() {
   button.disabled = true;
 
   try {
-    setProgress(2, 'กำลังวิเคราะห์ข้อมูล 1...');
-    state.text[0] = await runOcrOnFile(
-      state.files[0], 1, 4, 48);
+    setProgress(2, 'กำลังอ่านข้อมูล 1...');
+    state.text[0] = await runOcrOnFile(state.files[0], 1, 4, 48);
 
-    setProgress(50, 'กำลังวิเคราะห์ข้อมูล 2...');
-    state.text[1] = await runOcrOnFile(
-      state.files[1], 2, 52, 96);
+    setProgress(50, 'กำลังอ่านข้อมูล 2...');
+    state.text[1] = await runOcrOnFile(state.files[1], 2, 52, 96);
 
     state.fields[0] = extractFields(state.text[0]);
     state.fields[1] = extractFields(state.text[1]);
@@ -614,14 +644,13 @@ async function checkDocuments() {
     renderResults();
     document.querySelector('#resultSection').classList.remove('hidden');
     setProgress(100, 'อ่านและเปรียบเทียบเสร็จแล้ว');
+
     document.querySelector('#resultSection').scrollIntoView({
       behavior: 'smooth',
     });
   } catch (error) {
     console.error(error);
-    showError(
-      `ไม่สามารถประมวลผลไฟล์ได้: ${error?.message || error}`
-    );
+    showError(`ไม่สามารถประมวลผลไฟล์ได้: ${error?.message || error}`);
   } finally {
     button.disabled = false;
   }
@@ -632,7 +661,7 @@ function resetAll() {
   state.text = ['', ''];
   state.fields = [emptyFields(), emptyFields()];
 
-  [1, 2].forEach((number) => {
+  [1, 2].forEach(number => {
     document.querySelector(`#file${number}`).value = '';
     document.querySelector(`#fileName${number}`).textContent =
       'ยังไม่ได้เลือกไฟล์';
@@ -647,9 +676,6 @@ function resetAll() {
 
 attachUpload(0);
 attachUpload(1);
-document.querySelector('#checkButton').addEventListener(
-  'click', checkDocuments);
-document.querySelector('#resetButton').addEventListener(
-  'click', resetAll);
-document.querySelector('#printButton').addEventListener(
-  'click', () => window.print());
+document.querySelector('#checkButton').addEventListener('click', checkDocuments);
+document.querySelector('#resetButton').addEventListener('click', resetAll);
+document.querySelector('#printButton').addEventListener('click', () => window.print());
