@@ -1,30 +1,30 @@
-# EAR OCR Checker — Mapped V6
+# EAR OCR Checker — Spatial V7
 
-เวอร์ชันนี้กำหนด mapping ของหัวข้อระหว่างเอกสาร 2 แบบโดยตรง
+เวอร์ชันนี้เปลี่ยนวิธีอ่านจาก text parser เป็น spatial OCR
 
-## Mapping
-File 1 (EAR) -> File 2 (Vehicle Control Form)
+## คู่ข้อมูลที่ตรวจ
+- File 1: CONTAINER NUMBER ↔ File 2: Container No.
+- File 1: SEAL NO ↔ File 2: SEAL
+- File 1: BOOKING ↔ File 2: Booking No.
 
-- CONTAINER NUMBER -> Container No.
-- SEAL NO -> SEAL
-- BOOKING -> Booking No.
+## หลักการ
+OCR จะคืนตำแหน่งของแต่ละคำ (bounding box)
+ระบบหา label ก่อน แล้วอ่านเฉพาะ code ที่อยู่ทางขวาในแถวเดียวกัน
+ถ้าไม่มี จะดูพื้นที่แคบ ๆ ใต้ label เท่านั้น
 
-ระบบจะไม่ต้องให้ชื่อหัวข้อเหมือนกัน แต่จะมองว่าแต่ละคู่คือข้อมูลชนิดเดียวกัน
+จึงไม่ควรหยิบ FAX, Order No., Invoice No. หรือเลขจากช่องอื่นมาเป็น BOOKING/SEAL
 
-## วิธีดึงค่า
-- ค้นหาหัวข้อเฉพาะตามประเภทของ File 1 และ File 2
-- อ่านค่าที่อยู่หลังหัวข้อเดียวกัน หรือไม่เกิน 2 บรรทัดถัดไป
-- ถ้าเจอหัวข้ออื่นก่อน จะหยุด ไม่หยิบเลขข้ามช่อง
-- SEAL / BOOKING จะไม่ใช้ global guessing
-- CONTAINER มี fallback เฉพาะรูปแบบ AAAA1234567
-- ก่อนเปรียบเทียบจะลบเครื่องหมายขีดและช่องว่าง เช่น TCKU-4852578 = TCKU4852578
+## ผลตรวจ
+- ทั้ง 3 คู่ตรงกัน: ผ่าน
+- มีคู่ใดไม่ตรง: ไม่ผ่าน และระบุชื่อหัวข้อที่ไม่ตรง
+- อ่านไม่ครบ: แจ้งว่ามีข้อมูลอ่านไม่พบ
 
-## อัปเดต GitHub
-แตก ZIP แล้วอัปโหลดไฟล์ 5 ไฟล์ทับ repository เดิม:
+## วิธีอัปเดต GitHub
+แตก ZIP แล้วอัปโหลด 5 ไฟล์นี้ทับ repository เดิม:
 - index.html
 - app.js
 - styles.css
 - vercel.json
 - README.md
 
-Commit changes แล้ว Vercel จะ deploy อัตโนมัติ
+Commit changes แล้วรอ Vercel deploy อัตโนมัติ
