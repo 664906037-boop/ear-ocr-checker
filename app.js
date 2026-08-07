@@ -5,7 +5,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
 const state = {
   files: [null, null],
   fields: [emptyFields(), emptyFields()],
-  debug: [[], []],
+  roiImages: [emptyRoiImages(), emptyRoiImages()],
 };
 
 const FIELD_CONFIG = [
@@ -14,18 +14,23 @@ const FIELD_CONFIG = [
   { key: 'booking', label: 'BOOKING' },
 ];
 
-// File 1 = EAR, File 2 = Vehicle Control Form.
-// Labels are intentionally different between the two files.
-const LABEL_ALIASES = [
+// ROI positions are relative to a normalized full document (x, y, width, height).
+// Calibrated from the two real forms supplied by the user.
+//
+// File 1 — EAR:
+// Container Number is left-middle, Seal below it, Booking on the right.
+// File 2 — Vehicle Control Form:
+// Container / Booking / Seal values are stacked in the left-middle area.
+const ROI = [
   {
-    containerNumber: ['CONTAINER NUMBER', 'CONTAINER NO', 'หมายเลขตู้', 'เลขตู้'],
-    sealNo: ['SEAL NO', 'SEAL NUMBER', 'หมายเลขซีล', 'เลขซีล'],
-    booking: ['BOOKING', 'BOOKING NO', 'BOOKING NUMBER', 'หมายเลขจอง', 'เลขบุ๊กกิ้ง']
+    containerNumber: { x: 0.045, y: 0.220, w: 0.310, h: 0.060 },
+    sealNo:          { x: 0.045, y: 0.255, w: 0.315, h: 0.060 },
+    booking:         { x: 0.610, y: 0.235, w: 0.360, h: 0.065 },
   },
   {
-    containerNumber: ['CONTAINER NO', 'CONTAINER NUMBER', 'หมายเลขตู้', 'เลขตู้'],
-    sealNo: ['SEAL', 'SEAL NO', 'SEAL NUMBER', 'หมายเลขซีล', 'เลขซีล'],
-    booking: ['BOOKING NO', 'BOOKING NUMBER', 'BOOKING', 'หมายเลขจอง', 'เลขบุ๊กกิ้ง']
+    containerNumber: { x: 0.185, y: 0.275, w: 0.270, h: 0.047 },
+    booking:         { x: 0.185, y: 0.300, w: 0.270, h: 0.047 },
+    sealNo:          { x: 0.185, y: 0.337, w: 0.270, h: 0.047 },
   }
 ];
 
@@ -36,6 +41,10 @@ const THAI_DIGITS = {
 
 function emptyFields() {
   return { containerNumber:'', sealNo:'', booking:'' };
+}
+
+function emptyRoiImages() {
+  return { containerNumber:null, sealNo:null, booking:null };
 }
 
 function thaiToArabic(v) {
@@ -56,272 +65,86 @@ function cleanCode(v) {
     .replace(/[^A-Z0-9]/g,'');
 }
 
-function fixLabel(v) {
-  return thaiToArabic(v)
-    .toUpperCase()
-    .replace(/C[0O]NTA[I1L]NER/g,'CONTAINER')
-    .replace(/B[0O][0O]K[I1L]NG/g,'BOOKING')
-    .replace(/SEA[I1L]/g,'SEAL')
-    .replace(/\bN[0O]\b/g,'NO')
-    .replace(/\s+/g,' ')
-    .trim();
-}
-
 function repairContainer(v) {
   const raw = cleanCode(v);
-  if (raw.length < 11) return raw;
-  const s = raw.slice(0,11);
-  const prefix = s.slice(0,4)
-    .replace(/0/g,'O')
-    .replace(/1/g,'I')
-    .replace(/5/g,'S')
-    .replace(/8/g,'B');
-  const digits = s.slice(4)
-    .replace(/O/g,'0')
-    .replace(/[IL]/g,'1')
-    .replace(/Z/g,'2')
-    .replace(/S/g,'5')
-    .replace(/B/g,'8')
-    .replace(/G/g,'6');
-  return prefix + digits;
+  const matches = raw.match(/[A-Z0-9]{11}/g) || [];
+  for (const item of matches.length ? matches : [raw]) {
+    if (item.length < 11) continue;
+    const s = item.slice(0,11);
+
+    const prefix = s.slice(0,4)
+      .replace(/0/g,'O')
+      .replace(/1/g,'I')
+      .replace(/5/g,'S')
+      .replace(/8/g,'B');
+
+    const digits = s.slice(4)
+      .replace(/O/g,'0')
+      .replace(/[IL]/g,'1')
+      .replace(/Z/g,'2')
+      .replace(/S/g,'5')
+      .replace(/B/g,'8')
+      .replace(/G/g,'6');
+
+    const value = prefix + digits;
+    if (/^[A-Z]{4}\d{7}$/.test(value)) return value;
+  }
+  return '';
 }
 
-function isValidValue(fieldKey, raw) {
-  const v = fieldKey === 'containerNumber'
-    ? repairContainer(raw)
-    : cleanCode(raw);
+function parseField(fieldKey, rawText) {
+  const text = thaiToArabic(String(rawText || '')).toUpperCase();
 
   if (fieldKey === 'containerNumber') {
-    return /^[A-Z]{4}\d{7}$/.test(v);
+    // Prefer exact ISO-like container code from this small ROI.
+    const rawCandidates = text.match(/[A-Z0-9][A-Z0-9\s\-]{9,16}/g) || [];
+    for (const c of rawCandidates) {
+      const repaired = repairContainer(c);
+      if (repaired) return repaired;
+    }
+    return repairContainer(text);
   }
 
-  if (!/[A-Z]/.test(v) || !/\d/.test(v)) return false;
+  // ROI contains only the target value area, so choose alphanumeric code
+  // rather than searching the whole document.
+  const candidates = (text.match(/[A-Z0-9][A-Z0-9\-_/]{4,20}/g) || [])
+    .map(cleanCode)
+    .filter(v => /[A-Z]/.test(v) && /\d/.test(v));
 
   if (fieldKey === 'sealNo') {
-    return v.length >= 7 && v.length <= 14;
+    const ranked = candidates
+      .filter(v => v.length >= 7 && v.length <= 14)
+      .sort((a,b) => Math.abs(a.length-9)-Math.abs(b.length-9));
+    return ranked[0] || '';
   }
 
   if (fieldKey === 'booking') {
-    return v.length >= 8 && v.length <= 16;
-  }
-
-  return false;
-}
-
-function valueFor(fieldKey, raw) {
-  return fieldKey === 'containerNumber'
-    ? repairContainer(raw)
-    : cleanCode(raw);
-}
-
-function levenshtein(a, b) {
-  a = fixLabel(a); b = fixLabel(b);
-  const m = Array.from({length:a.length+1},()=>Array(b.length+1).fill(0));
-  for(let i=0;i<=a.length;i++) m[i][0]=i;
-  for(let j=0;j<=b.length;j++) m[0][j]=j;
-  for(let i=1;i<=a.length;i++){
-    for(let j=1;j<=b.length;j++){
-      m[i][j]=Math.min(
-        m[i-1][j]+1,
-        m[i][j-1]+1,
-        m[i-1][j-1]+(a[i-1]===b[j-1]?0:1)
-      );
-    }
-  }
-  return m[a.length][b.length];
-}
-
-function similarity(a,b) {
-  a=fixLabel(a); b=fixLabel(b);
-  if(!a || !b) return 0;
-  return 1 - levenshtein(a,b)/Math.max(a.length,b.length);
-}
-
-function wordBox(word) {
-  const b = word.bbox || {};
-  const x0 = b.x0 ?? 0, y0 = b.y0 ?? 0, x1 = b.x1 ?? 0, y1 = b.y1 ?? 0;
-  return {
-    x0,y0,x1,y1,
-    cx:(x0+x1)/2,
-    cy:(y0+y1)/2,
-    w:Math.max(1,x1-x0),
-    h:Math.max(1,y1-y0)
-  };
-}
-
-function usableWords(words) {
-  return (words || [])
-    .filter(w => w && String(w.text || '').trim())
-    .map(w => ({
-      text:String(w.text || '').trim(),
-      conf:Number(w.confidence ?? w.conf ?? 0),
-      ...wordBox(w)
-    }))
-    .filter(w => w.conf >= 18);
-}
-
-function groupLines(words) {
-  const sorted=[...words].sort((a,b)=>a.cy-b.cy || a.x0-b.x0);
-  const lines=[];
-
-  for(const word of sorted){
-    let best=null, bestDist=Infinity;
-
-    for(const line of lines){
-      const tol=Math.max(12, Math.max(line.avgH,word.h)*0.7);
-      const d=Math.abs(line.cy-word.cy);
-      if(d<=tol && d<bestDist){
-        best=line;bestDist=d;
-      }
-    }
-
-    if(!best){
-      lines.push({
-        words:[word],
-        cy:word.cy,
-        avgH:word.h
-      });
-    }else{
-      best.words.push(word);
-      best.cy=best.words.reduce((s,x)=>s+x.cy,0)/best.words.length;
-      best.avgH=best.words.reduce((s,x)=>s+x.h,0)/best.words.length;
-    }
-  }
-
-  for(const line of lines){
-    line.words.sort((a,b)=>a.x0-b.x0);
-    line.text=line.words.map(w=>w.text).join(' ');
-  }
-
-  return lines.sort((a,b)=>a.cy-b.cy);
-}
-
-function findLabelSpan(line, aliases) {
-  const words=line.words;
-
-  // Test 1-3 consecutive OCR words. This handles "BOOKING NO", "SEAL NO",
-  // "CONTAINER NUMBER" while preserving their true bounding box.
-  let best=null;
-
-  for(let start=0;start<words.length;start++){
-    for(let count=1;count<=3 && start+count<=words.length;count++){
-      const seq=words.slice(start,start+count);
-      const text=seq.map(w=>w.text).join(' ');
-
-      for(const alias of aliases){
-        const sim=similarity(text,alias);
-        const threshold = alias.length <= 5 ? 0.72 : 0.66;
-
-        if(sim >= threshold && (!best || sim>best.sim)){
-          best={
-            sim,
-            start,
-            count,
-            x0:seq[0].x0,
-            x1:seq[seq.length-1].x1,
-            cy:seq.reduce((s,w)=>s+w.cy,0)/seq.length,
-            h:seq.reduce((s,w)=>s+w.h,0)/seq.length,
-            text
-          };
-        }
-      }
-    }
-  }
-
-  return best;
-}
-
-function codeFromWords(words, fieldKey) {
-  // Try individual words first, then two adjacent words (useful for TCKU- 4852578).
-  const attempts=[];
-
-  for(let i=0;i<words.length;i++){
-    attempts.push(words[i].text);
-    if(i+1<words.length){
-      attempts.push(words[i].text + words[i+1].text);
-    }
-  }
-
-  for(const raw of attempts){
-    if(isValidValue(fieldKey,raw)) return valueFor(fieldKey,raw);
+    const ranked = candidates
+      .filter(v => v.length >= 8 && v.length <= 16)
+      .sort((a,b) => b.length-a.length);
+    return ranked[0] || '';
   }
 
   return '';
 }
 
-function spatialExtract(words, side, fieldKey) {
-  const lines=groupLines(usableWords(words));
-  const aliases=LABEL_ALIASES[side][fieldKey];
-  const hits=[];
-
-  for(let i=0;i<lines.length;i++){
-    const line=lines[i];
-    const label=findLabelSpan(line,aliases);
-    if(!label) continue;
-
-    // PRIMARY RULE:
-    // choose only words to the RIGHT of this label on the SAME row.
-    const sameRow = line.words.filter(w =>
-      w.x0 >= label.x1 - 3 &&
-      Math.abs(w.cy-label.cy) <= Math.max(label.h,w.h)*0.9
-    );
-
-    const sameValue=codeFromWords(sameRow,fieldKey);
-    if(sameValue){
-      hits.push({
-        value:sameValue,
-        score:200 + label.sim*50,
-        why:`same-row ${label.text}`
-      });
-      continue;
-    }
-
-    // SECONDARY RULE:
-    // Some PDFs/OCR put the value just below the label.
-    // Search only a narrow region under this label, not the whole page.
-    const below=[];
-    for(let j=i+1;j<Math.min(lines.length,i+3);j++){
-      const next=lines[j];
-      const dy=next.cy-label.cy;
-      if(dy<0 || dy>Math.max(70,label.h*3.0)) continue;
-
-      for(const w of next.words){
-        const horizontallyRelated =
-          w.x0 >= label.x0 - label.h*1.5 &&
-          w.x0 <= label.x1 + Math.max(260,label.h*12);
-        if(horizontallyRelated) below.push(w);
-      }
-    }
-
-    const belowValue=codeFromWords(below,fieldKey);
-    if(belowValue){
-      hits.push({
-        value:belowValue,
-        score:130 + label.sim*40,
-        why:`below ${label.text}`
-      });
-    }
-  }
-
-  hits.sort((a,b)=>b.score-a.score);
-  return hits;
-}
-
 function compare(a,b) {
   const na=normalize(a), nb=normalize(b);
   return {
-    missing:!na || !nb,
-    match:!!(na && nb && na===nb)
+    missing: !na || !nb,
+    match: Boolean(na && nb && na === nb)
   };
 }
 
 function diffHint(a,b) {
   const na=normalize(a), nb=normalize(b);
   if(!na || !nb || na===nb) return '';
+
   const positions=[];
   for(let i=0;i<Math.max(na.length,nb.length);i++){
-    if((na[i]||'∅')!==(nb[i]||'∅')) positions.push(i+1);
+    if((na[i]||'∅') !== (nb[i]||'∅')) positions.push(i+1);
   }
+
   return `ไม่ตรงกันที่ตำแหน่ง: ${positions.slice(0,12).join(', ')}${positions.length>12?'…':''}`;
 }
 
@@ -329,48 +152,214 @@ function isPdf(file) {
   return file.type==='application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 }
 
-async function renderPdfPage(pdf,pageNumber,scale=2.8) {
+async function renderPdfPage(pdf,pageNumber,scale=3) {
   const page=await pdf.getPage(pageNumber);
   const viewport=page.getViewport({scale});
   const canvas=document.createElement('canvas');
   const ctx=canvas.getContext('2d',{willReadFrequently:true});
+
   canvas.width=Math.ceil(viewport.width);
   canvas.height=Math.ceil(viewport.height);
+
   await page.render({canvasContext:ctx,viewport}).promise;
   return canvas;
 }
 
 async function imageToCanvas(file) {
   const bmp=await createImageBitmap(file);
+
   const maxSide=3600;
   const scale=Math.min(4.5,Math.max(2,maxSide/Math.max(bmp.width,bmp.height)));
+
   const canvas=document.createElement('canvas');
   canvas.width=Math.round(bmp.width*scale);
   canvas.height=Math.round(bmp.height*scale);
+
   canvas.getContext('2d',{willReadFrequently:true})
     .drawImage(bmp,0,0,canvas.width,canvas.height);
+
   bmp.close();
   return canvas;
 }
 
-async function fileCanvases(file) {
-  if(file.type.startsWith('image/')) return [await imageToCanvas(file)];
+async function fileToCanvas(file) {
+  if(file.type.startsWith('image/')) {
+    return await imageToCanvas(file);
+  }
 
-  if(isPdf(file)){
+  if(isPdf(file)) {
     const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
-    const out=[];
-    for(let p=1;p<=Math.min(pdf.numPages,10);p++){
-      out.push(await renderPdfPage(pdf,p,3.2));
-    }
-    return out;
+    return await renderPdfPage(pdf,1,3.2);
   }
 
   throw new Error('รองรับเฉพาะ PDF, JPG, JPEG, PNG และ WEBP');
 }
 
-function preprocess(src,mode) {
+function waitForOpenCv(timeoutMs=15000) {
+  return new Promise(resolve => {
+    const start=Date.now();
+
+    const tick=()=>{
+      if(window.cv && window.cv.Mat) {
+        resolve(true);
+        return;
+      }
+
+      if(Date.now()-start > timeoutMs) {
+        resolve(false);
+        return;
+      }
+
+      setTimeout(tick,200);
+    };
+
+    tick();
+  });
+}
+
+function orderQuad(points) {
+  // points: [{x,y}, ...]
+  const sorted=[...points].sort((a,b)=>(a.x+a.y)-(b.x+b.y));
+  const tl=sorted[0];
+  const br=sorted[sorted.length-1];
+
+  const remaining=points.filter(p=>p!==tl && p!==br);
+  const tr=remaining.reduce((a,b)=>(a.x-a.y)>(b.x-b.y)?a:b);
+  const bl=remaining.find(p=>p!==tr);
+
+  return [tl,tr,br,bl];
+}
+
+function perspectiveNormalize(inputCanvas) {
+  // If OpenCV is unavailable, return original.
+  if(!window.cv || !window.cv.Mat) return inputCanvas;
+
+  let src=null, gray=null, blur=null, edges=null, contours=null, hierarchy=null;
+
+  try {
+    src=cv.imread(inputCanvas);
+    gray=new cv.Mat();
+    blur=new cv.Mat();
+    edges=new cv.Mat();
+
+    cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray,blur,new cv.Size(5,5),0);
+    cv.Canny(blur,edges,50,150);
+
+    contours=new cv.MatVector();
+    hierarchy=new cv.Mat();
+    cv.findContours(edges,contours,hierarchy,cv.RETR_LIST,cv.CHAIN_APPROX_SIMPLE);
+
+    let best=null;
+    let bestArea=0;
+
+    for(let i=0;i<contours.size();i++){
+      const cnt=contours.get(i);
+      const peri=cv.arcLength(cnt,true);
+      const approx=new cv.Mat();
+      cv.approxPolyDP(cnt,approx,0.02*peri,true);
+      const area=Math.abs(cv.contourArea(approx));
+
+      if(approx.rows===4 && area>bestArea && area>src.rows*src.cols*0.20){
+        if(best) best.delete();
+        best=approx.clone();
+        bestArea=area;
+      }
+
+      approx.delete();
+      cnt.delete();
+    }
+
+    if(!best) return inputCanvas;
+
+    const pts=[];
+    for(let i=0;i<4;i++){
+      pts.push({
+        x:best.intPtr(i,0)[0],
+        y:best.intPtr(i,0)[1]
+      });
+    }
+    best.delete();
+
+    const [tl,tr,br,bl]=orderQuad(pts);
+
+    const widthTop=Math.hypot(tr.x-tl.x,tr.y-tl.y);
+    const widthBottom=Math.hypot(br.x-bl.x,br.y-bl.y);
+    const heightLeft=Math.hypot(bl.x-tl.x,bl.y-tl.y);
+    const heightRight=Math.hypot(br.x-tr.x,br.y-tr.y);
+
+    const outW=Math.max(800,Math.round(Math.max(widthTop,widthBottom)));
+    const outH=Math.max(1100,Math.round(Math.max(heightLeft,heightRight)));
+
+    const srcPts=cv.matFromArray(4,1,cv.CV_32FC2,[
+      tl.x,tl.y, tr.x,tr.y, br.x,br.y, bl.x,bl.y
+    ]);
+
+    const dstPts=cv.matFromArray(4,1,cv.CV_32FC2,[
+      0,0, outW-1,0, outW-1,outH-1, 0,outH-1
+    ]);
+
+    const matrix=cv.getPerspectiveTransform(srcPts,dstPts);
+    const warped=new cv.Mat();
+
+    cv.warpPerspective(
+      src,warped,matrix,new cv.Size(outW,outH),
+      cv.INTER_LINEAR,cv.BORDER_CONSTANT,new cv.Scalar()
+    );
+
+    const out=document.createElement('canvas');
+    out.width=outW;
+    out.height=outH;
+    cv.imshow(out,warped);
+
+    srcPts.delete();
+    dstPts.delete();
+    matrix.delete();
+    warped.delete();
+
+    return out;
+  } catch(err) {
+    console.warn('Perspective normalization skipped:',err);
+    return inputCanvas;
+  } finally {
+    if(src) src.delete();
+    if(gray) gray.delete();
+    if(blur) blur.delete();
+    if(edges) edges.delete();
+    if(contours) contours.delete();
+    if(hierarchy) hierarchy.delete();
+  }
+}
+
+function cropCanvas(source, roi, padding=0.01) {
+  const x=Math.max(0,Math.round((roi.x-padding)*source.width));
+  const y=Math.max(0,Math.round((roi.y-padding)*source.height));
+  const w=Math.min(
+    source.width-x,
+    Math.round((roi.w+padding*2)*source.width)
+  );
+  const h=Math.min(
+    source.height-y,
+    Math.round((roi.h+padding*2)*source.height)
+  );
+
+  const scale=3;
+  const out=document.createElement('canvas');
+  out.width=Math.max(1,w*scale);
+  out.height=Math.max(1,h*scale);
+
+  const ctx=out.getContext('2d',{willReadFrequently:true});
+  ctx.imageSmoothingEnabled=true;
+  ctx.drawImage(source,x,y,w,h,0,0,out.width,out.height);
+
+  return out;
+}
+
+function preprocessRoi(src, mode) {
   const c=document.createElement('canvas');
-  c.width=src.width;c.height=src.height;
+  c.width=src.width;
+  c.height=src.height;
+
   const ctx=c.getContext('2d',{willReadFrequently:true});
   ctx.drawImage(src,0,0);
 
@@ -384,9 +373,9 @@ function preprocess(src,mode) {
     let v=gray;
 
     if(mode==='contrast'){
-      v=Math.max(0,Math.min(255,(gray-128)*2.1+128));
-    }else if(mode==='threshold'){
-      v=gray<195?0:255;
+      v=Math.max(0,Math.min(255,(gray-128)*2.3+128));
+    } else if(mode==='threshold'){
+      v=gray<185?0:255;
     }
 
     d[i]=d[i+1]=d[i+2]=v;
@@ -396,96 +385,112 @@ function preprocess(src,mode) {
   return c;
 }
 
-async function runSpatialOcr(file,side,fileNo,start,end) {
-  const canvases=await fileCanvases(file);
-  const worker=await Tesseract.createWorker('eng+tha',1,{
+async function recognizeRoi(worker,canvas,fieldKey) {
+  const results=[];
+
+  const passes=[
+    ['original',7],
+    ['contrast',7],
+    ['threshold',7],
+    ['contrast',8]
+  ];
+
+  for(const [mode,psm] of passes){
+    const processed=preprocessRoi(canvas,mode);
+
+    await worker.setParameters({
+      tessedit_pageseg_mode:String(psm),
+      preserve_interword_spaces:'1',
+      user_defined_dpi:'300',
+      tessedit_char_whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_/'
+    });
+
+    const result=await worker.recognize(processed);
+    const text=result.data.text || '';
+    const parsed=parseField(fieldKey,text);
+
+    results.push({
+      value:parsed,
+      text,
+      confidence:Number(result.data.confidence || 0)
+    });
+  }
+
+  // Vote: same parsed value across passes wins.
+  const map=new Map();
+  for(const r of results){
+    if(!r.value) continue;
+
+    const k=normalize(r.value);
+    const old=map.get(k) || {value:r.value,count:0,conf:0};
+    old.count += 1;
+    old.conf += r.confidence;
+    map.set(k,old);
+  }
+
+  const ranked=[...map.values()]
+    .sort((a,b)=>b.count-a.count || b.conf-a.conf);
+
+  return {
+    value:ranked[0]?.value || '',
+    debug:results
+  };
+}
+
+async function extractThreeFields(file,side,fileNo,start,end) {
+  const input=await fileToCanvas(file);
+
+  setProgress(start+3,`ข้อมูล ${fileNo}: กำลังจัดหน้าเอกสาร...`);
+  await waitForOpenCv(5000);
+  const normalized = perspectiveNormalize(input);
+
+  const worker=await Tesseract.createWorker('eng',1,{
     logger:m=>{
       if(m.status==='recognizing text'){
         const q=m.progress||0;
         setProgress(
-          start+(end-start)*Math.min(.9,q),
+          start+(end-start)*Math.min(.92,q),
           `กำลังอ่านข้อมูล ${fileNo}: ${Math.round(q*100)}%`
         );
       }
     }
   });
 
-  const allPasses=[];
+  const fields=emptyFields();
+  const roiImages=emptyRoiImages();
+  const debug=[];
 
-  try{
-    for(let p=0;p<canvases.length;p++){
-      const page=canvases[p];
+  try {
+    let index=0;
 
-      // PSM 6: blocks / form rows.
-      // PSM 11: sparse text, useful for photographed forms.
-      const passes=[
-        ['original',6,'ต้นฉบับ'],
-        ['contrast',6,'เพิ่มความคม'],
-        ['contrast',11,'อ่านข้อความกระจาย'],
-        ['threshold',11,'ขาวดำ']
-      ];
+    for(const {key,label} of FIELD_CONFIG){
+      index += 1;
 
-      for(let k=0;k<passes.length;k++){
-        const [mode,psm,name]=passes[k];
+      setProgress(
+        start+(end-start)*(index/4),
+        `ข้อมูล ${fileNo}: อ่าน ${label}`
+      );
 
-        setProgress(
-          start+(end-start)*((p*passes.length+k+1)/(canvases.length*passes.length)),
-          `ข้อมูล ${fileNo} หน้า ${p+1}: ${name}`
-        );
+      const crop=cropCanvas(normalized,ROI[side][key],0.012);
+      roiImages[key]=crop.toDataURL('image/png');
 
-        await worker.setParameters({
-          tessedit_pageseg_mode:String(psm),
-          preserve_interword_spaces:'1',
-          user_defined_dpi:'300'
-        });
+      const result=await recognizeRoi(worker,crop,key);
+      fields[key]=result.value;
 
-        const result=await worker.recognize(preprocess(page,mode));
-
-        allPasses.push({
-          page:p+1,
-          name,
-          text:result.data.text || '',
-          words:result.data.words || []
-        });
-      }
+      debug.push({
+        key,
+        label,
+        passes:result.debug
+      });
     }
-  }finally{
+  } finally {
     await worker.terminate();
   }
 
-  const fields=emptyFields();
-  const debug={};
-
-  for(const {key} of FIELD_CONFIG){
-    const candidates=[];
-
-    for(const pass of allPasses){
-      const hits=spatialExtract(pass.words,side,key);
-      for(const hit of hits){
-        candidates.push({
-          ...hit,
-          source:`หน้า ${pass.page} ${pass.name}`
-        });
-      }
-    }
-
-    // Deduplicate and keep highest-confidence spatial result.
-    const bestMap=new Map();
-    for(const c of candidates){
-      const n=normalize(c.value);
-      const old=bestMap.get(n);
-      if(!old || c.score>old.score) bestMap.set(n,c);
-    }
-
-    const ranked=[...bestMap.values()].sort((a,b)=>b.score-a.score);
-    fields[key]=ranked[0]?.value || '';
-    debug[key]=ranked.slice(0,5);
-  }
-
-  return {fields,debug,passes:allPasses};
+  return {fields,roiImages,debug};
 }
 
-function setProgress(p,t) {
+function setProgress(p,t){
   document.querySelector('#progressWrap').classList.remove('hidden');
   document.querySelector('#progressBar').style.width =
     `${Math.max(0,Math.min(100,p))}%`;
@@ -517,18 +522,21 @@ function renderResults(){
   body.innerHTML='';
 
   const mismatches=[];
+  const missing=[];
 
   for(const cfg of FIELD_CONFIG){
     const result=compare(state.fields[0][cfg.key],state.fields[1][cfg.key]);
 
     let statusClass, statusText;
+
     if(result.missing){
       statusClass='missing';
       statusText='อ่านข้อมูลไม่ครบ';
-    }else if(result.match){
+      missing.push(cfg.label);
+    } else if(result.match){
       statusClass='match';
       statusText='ตรงกัน';
-    }else{
+    } else {
       statusClass='mismatch';
       statusText='ไม่ตรงกัน';
       mismatches.push(cfg.label);
@@ -537,21 +545,32 @@ function renderResults(){
     const hint=diffHint(state.fields[0][cfg.key],state.fields[1][cfg.key]);
 
     const row=document.createElement('tr');
+
     row.innerHTML=`
       <td>${cfg.label}</td>
+
       <td>
         <input data-side="0" data-key="${cfg.key}"
           value="${escapeHtml(state.fields[0][cfg.key])}">
+        ${state.roiImages[0][cfg.key]
+          ? `<details style="margin-top:6px"><summary style="font-size:11px;color:#667085;cursor:pointer">ดูกรอบที่ระบบอ่าน</summary><img src="${state.roiImages[0][cfg.key]}" style="max-width:260px;margin-top:6px;border:1px solid #d0d5dd;border-radius:8px"></details>`
+          : ''}
       </td>
+
       <td>
         <input data-side="1" data-key="${cfg.key}"
           value="${escapeHtml(state.fields[1][cfg.key])}">
+        ${state.roiImages[1][cfg.key]
+          ? `<details style="margin-top:6px"><summary style="font-size:11px;color:#667085;cursor:pointer">ดูกรอบที่ระบบอ่าน</summary><img src="${state.roiImages[1][cfg.key]}" style="max-width:260px;margin-top:6px;border:1px solid #d0d5dd;border-radius:8px"></details>`
+          : ''}
       </td>
+
       <td>
         <span class="status ${statusClass}">${statusText}</span>
         ${hint?`<div class="char-diff">${hint}</div>`:''}
       </td>
     `;
+
     body.append(row);
   }
 
@@ -562,51 +581,44 @@ function renderResults(){
     });
   });
 
-  const complete=FIELD_CONFIG.every(({key}) =>
-    normalize(state.fields[0][key]) && normalize(state.fields[1][key])
-  );
-  const passed=complete && FIELD_CONFIG.every(({key}) =>
-    compare(state.fields[0][key],state.fields[1][key]).match
-  );
-
   const overall=document.querySelector('#overallStatus');
 
-  if(passed){
+  if(!missing.length && !mismatches.length){
     overall.textContent='ผ่านการตรวจสอบ — ทั้ง 3 หัวข้อตรงกัน';
     overall.className='overall pass';
-  }else if(!complete){
-    overall.textContent='ยังตรวจไม่ครบ — มีข้อมูลที่อ่านไม่พบ';
+  } else if(missing.length){
+    overall.textContent=`ยังตรวจไม่ครบ — อ่านไม่พบ: ${missing.join(', ')}`;
     overall.className='overall fail';
-  }else{
-    overall.textContent=`ไม่ผ่าน — ไม่ตรงกัน: ${mismatches.join(', ')}`;
+  } else {
+    overall.textContent=`ไม่ผ่าน — หัวข้อที่ไม่ตรง: ${mismatches.join(', ')}`;
     overall.className='overall fail';
   }
 }
 
 async function renderPreview(index,file){
-  const p=document.querySelector(`#preview${index+1}`);
-  p.innerHTML='';
+  const preview=document.querySelector(`#preview${index+1}`);
+  preview.innerHTML='';
 
   if(!file){
-    p.innerHTML='<span>ตัวอย่างเอกสารจะแสดงที่นี่</span>';
+    preview.innerHTML='<span>ตัวอย่างเอกสารจะแสดงที่นี่</span>';
     return;
   }
 
   if(isPdf(file)){
     const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
-    p.append(await renderPdfPage(pdf,1,1.2));
-  }else if(file.type.startsWith('image/')){
+    preview.append(await renderPdfPage(pdf,1,1.2));
+  } else if(file.type.startsWith('image/')){
     const img=new Image();
     img.src=URL.createObjectURL(file);
     img.alt=file.name;
-    p.append(img);
+    preview.append(img);
   }
 }
 
 async function setFile(index,file){
   state.files[index]=file;
   state.fields[index]=emptyFields();
-  state.debug[index]=[];
+  state.roiImages[index]=emptyRoiImages();
 
   document.querySelector(`#fileName${index+1}`).textContent =
     file?.name || 'ยังไม่ได้เลือกไฟล์';
@@ -623,23 +635,23 @@ function attachUpload(index){
     setFile(index,input.files?.[0]||null);
   });
 
-  ['dragenter','dragover'].forEach(n =>
-    drop.addEventListener(n,e=>{
+  ['dragenter','dragover'].forEach(name =>
+    drop.addEventListener(name,e=>{
       e.preventDefault();
       drop.classList.add('drag');
     })
   );
 
-  ['dragleave','drop'].forEach(n =>
-    drop.addEventListener(n,e=>{
+  ['dragleave','drop'].forEach(name =>
+    drop.addEventListener(name,e=>{
       e.preventDefault();
       drop.classList.remove('drag');
     })
   );
 
   drop.addEventListener('drop',e=>{
-    const f=e.dataTransfer?.files?.[0];
-    if(f) setFile(index,f);
+    const file=e.dataTransfer?.files?.[0];
+    if(file) setFile(index,file);
   });
 }
 
@@ -647,28 +659,31 @@ async function checkDocuments(){
   clearError();
 
   if(!state.files[0] || !state.files[1]){
-    showError('กรุณาเลือกไฟล์ทั้ง 2 ฝั่ง');
+    showError('กรุณาเลือกไฟล์ข้อมูล 1 และข้อมูล 2 ให้ครบ');
     return;
   }
 
-  const btn=document.querySelector('#checkButton');
-  btn.disabled=true;
+  const button=document.querySelector('#checkButton');
+  button.disabled=true;
 
   try{
-    setProgress(2,'กำลังอ่านข้อมูล 1 — ใบ EAR...');
-    const r1=await runSpatialOcr(state.files[0],0,1,3,48);
-    state.fields[0]=r1.fields;
-    state.debug[0]=r1.debug;
+    setProgress(2,'กำลังเตรียมข้อมูล 1 — ใบ EAR...');
+    const a=await extractThreeFields(state.files[0],0,1,3,48);
 
-    setProgress(50,'กำลังอ่านข้อมูล 2 — แบบฟอร์มควบคุมรถ...');
-    const r2=await runSpatialOcr(state.files[1],1,2,52,97);
-    state.fields[1]=r2.fields;
-    state.debug[1]=r2.debug;
+    state.fields[0]=a.fields;
+    state.roiImages[0]=a.roiImages;
+
+    setProgress(51,'กำลังเตรียมข้อมูล 2 — แบบฟอร์มควบคุมรถ...');
+    const b=await extractThreeFields(state.files[1],1,2,52,97);
+
+    state.fields[1]=b.fields;
+    state.roiImages[1]=b.roiImages;
 
     document.querySelector('#rawText1').textContent =
-      r1.passes.map(x=>`--- ${x.name} ---\n${x.text}`).join('\n\n');
+      JSON.stringify(a.debug,null,2);
+
     document.querySelector('#rawText2').textContent =
-      r2.passes.map(x=>`--- ${x.name} ---\n${x.text}`).join('\n\n');
+      JSON.stringify(b.debug,null,2);
 
     document.querySelector('#reportFile1').textContent=state.files[0].name;
     document.querySelector('#reportFile2').textContent=state.files[1].name;
@@ -676,26 +691,30 @@ async function checkDocuments(){
       new Date().toLocaleString('th-TH');
 
     renderResults();
+
     document.querySelector('#resultSection').classList.remove('hidden');
-    setProgress(100,'อ่านและเปรียบเทียบเสร็จแล้ว');
-    document.querySelector('#resultSection').scrollIntoView({behavior:'smooth'});
-  }catch(e){
-    console.error(e);
-    showError(`ไม่สามารถประมวลผลได้: ${e?.message || e}`);
-  }finally{
-    btn.disabled=false;
+    setProgress(100,'อ่าน 3 ช่องและเปรียบเทียบเสร็จแล้ว');
+
+    document.querySelector('#resultSection')
+      .scrollIntoView({behavior:'smooth'});
+  } catch(error){
+    console.error(error);
+    showError(`ไม่สามารถประมวลผลได้: ${error?.message || error}`);
+  } finally {
+    button.disabled=false;
   }
 }
 
 function resetAll(){
   state.files=[null,null];
   state.fields=[emptyFields(),emptyFields()];
-  state.debug=[[],[]];
+  state.roiImages=[emptyRoiImages(),emptyRoiImages()];
 
   [1,2].forEach(n=>{
     document.querySelector(`#file${n}`).value='';
     document.querySelector(`#fileName${n}`).textContent='ยังไม่ได้เลือกไฟล์';
-    document.querySelector(`#preview${n}`).innerHTML='<span>ตัวอย่างเอกสารจะแสดงที่นี่</span>';
+    document.querySelector(`#preview${n}`).innerHTML=
+      '<span>ตัวอย่างเอกสารจะแสดงที่นี่</span>';
   });
 
   document.querySelector('#resultSection').classList.add('hidden');
@@ -705,6 +724,12 @@ function resetAll(){
 
 attachUpload(0);
 attachUpload(1);
-document.querySelector('#checkButton').addEventListener('click',checkDocuments);
-document.querySelector('#resetButton').addEventListener('click',resetAll);
-document.querySelector('#printButton').addEventListener('click',()=>window.print());
+
+document.querySelector('#checkButton')
+  .addEventListener('click',checkDocuments);
+
+document.querySelector('#resetButton')
+  .addEventListener('click',resetAll);
+
+document.querySelector('#printButton')
+  .addEventListener('click',()=>window.print());
